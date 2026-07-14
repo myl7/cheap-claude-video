@@ -1,4 +1,4 @@
-"""WATCH_DETAIL resolution and frame_cap mapping."""
+"""WATCH_DETAIL / WATCH_TRANSCRIBER resolution and frame_cap mapping."""
 from __future__ import annotations
 
 import config
@@ -22,11 +22,30 @@ def test_invalid_detail_falls_back_to_default(monkeypatch, tmp_path):
     assert config.get_config()["detail"] == "balanced"
 
 
+def test_default_transcriber_is_auto(monkeypatch, tmp_path):
+    monkeypatch.delenv("WATCH_TRANSCRIBER", raising=False)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
+    assert config.get_config()["transcriber"] == "auto"
+
+
+def test_env_overrides_transcriber(monkeypatch, tmp_path):
+    monkeypatch.setenv("WATCH_TRANSCRIBER", "doubao")
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
+    assert config.get_config()["transcriber"] == "doubao"
+
+
+def test_invalid_transcriber_falls_back_to_auto(monkeypatch, tmp_path):
+    monkeypatch.setenv("WATCH_TRANSCRIBER", "bogus")
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
+    assert config.get_config()["transcriber"] == "auto"
+
+
 def test_get_config_keys(monkeypatch, tmp_path):
     monkeypatch.delenv("WATCH_DETAIL", raising=False)
+    monkeypatch.delenv("WATCH_TRANSCRIBER", raising=False)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     cfg = config.get_config()
-    assert set(cfg) == {"detail", "config_file"}
+    assert set(cfg) == {"detail", "transcriber", "config_file"}
 
 
 def test_frame_cap_mapping():

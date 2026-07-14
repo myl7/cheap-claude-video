@@ -40,7 +40,7 @@ ENV_TEMPLATE = """# /watch API configuration
 # Whisper transcription fallback — used only when yt-dlp cannot get captions
 # (or when you point /watch at a local file with no subtitles).
 #
-# Groq is preferred: it runs whisper-large-v3 at a fraction of OpenAI's price
+# Groq is preferred: it runs whisper-large-v3-turbo at a fraction of OpenAI's price
 # and is faster in practice. OpenAI is the compatible fallback.
 #
 # Get a Groq key:  https://console.groq.com/keys
@@ -52,10 +52,44 @@ ENV_TEMPLATE = """# /watch API configuration
 GROQ_API_KEY=
 OPENAI_API_KEY=
 
+# Doubao (Volcano Engine) streaming ASR 2.0 — optional alternative transcriber.
+# Better than Whisper for Chinese and Chinese dialects (普通话/粤语/上海话/四川话…)
+# and mixed zh/en. Streams local audio directly (no object storage needed),
+# ~1 CNY/hour. Enable the service and get credentials at:
+#   https://console.volcengine.com/speech/app  (开通「豆包流式语音识别模型2.0」)
+# Old console: set APP ID + Access Token. New console: set just the API key.
+DOUBAO_ASR_APP_ID=
+DOUBAO_ASR_ACCESS_TOKEN=
+# DOUBAO_ASR_API_KEY=
+# DOUBAO_ASR_RESOURCE_ID=volc.seedasr.sauc.duration
+# DOUBAO_ASR_LANGUAGE=          # blank = auto (zh + dialects + en). e.g. zh-CN, en-US, ja-JP
+
 # Default watch behavior (the /watch first-run wizard sets this for you).
 # Allowed values: transcript | efficient | balanced | token-burner
 # Keep the value on its own line with no trailing comment.
 # WATCH_DETAIL=balanced
+
+# Which transcriber to use: auto (Whisper Groq→OpenAI) | groq | openai | doubao.
+# Set to doubao to make Doubao streaming ASR 2.0 the default.
+# WATCH_TRANSCRIBER=auto
+
+# yt-dlp options for gated sites. Bilibili rejects the default yt-dlp UA with
+# HTTP 412 — set a browser to pull cookies from (a browser UA is added too).
+# Values: chrome | firefox | chromium | edge | brave | chrome:ProfileName
+# WATCH_YTDLP_COOKIES_FROM_BROWSER=chrome
+# WATCH_YTDLP_COOKIES_FILE=/path/to/cookies.txt
+# WATCH_YTDLP_USER_AGENT=
+
+# Caption languages to fetch (comma-separated). Native captions are free, so the
+# skill prefers them (in the video's own language) before paying an ASR backend.
+# Default covers Chinese variants + English; add your language if it differs.
+# WATCH_SUB_LANGS=zh-Hans,zh-Hant,zh,zh-CN,zh-TW,zh-HK,yue,en-orig,en,en-US,en-GB
+
+# YouTube's newer anti-bot sometimes needs a remote JS challenge solver.
+# Disabled by default (it fetches+runs a solver component from yt-dlp's
+# GitHub) — set this if a YouTube download fails with an anti-bot error.
+# Non-YouTube sites never use it regardless of this setting.
+# WATCH_YTDLP_REMOTE_COMPONENTS=ejs:github
 """
 
 
@@ -113,7 +147,31 @@ def _read_env_key(name: str) -> str | None:
     return None
 
 
+def _have_doubao_creds() -> bool:
+    if _read_env_key("DOUBAO_ASR_API_KEY"):
+        return True
+    app_id = _read_env_key("DOUBAO_ASR_APP_ID") or _read_env_key("DOUBAO_ASR_APP_KEY")
+    token = _read_env_key("DOUBAO_ASR_ACCESS_TOKEN") or _read_env_key("DOUBAO_ASR_ACCESS_KEY")
+    return bool(app_id and token)
+
+
 def _have_api_key() -> tuple[bool, str | None]:
+    """Whether the *effective* transcriber (per WATCH_TRANSCRIBER) has usable
+    credentials — mirrors watch.py's backend resolution so `ready` here means
+    /watch will actually find a transcriber at runtime. `auto` only ever tries
+    Whisper (Groq -> OpenAI); Doubao counts only when explicitly selected via
+    WATCH_TRANSCRIBER=doubao, since picking it also opts audio into a
+    different (Chinese cloud) provider.
+    """
+    transcriber = get_config()["transcriber"]
+
+    if transcriber == "doubao":
+        return (True, "doubao") if _have_doubao_creds() else (False, None)
+    if transcriber == "groq":
+        return (True, "groq") if _read_env_key("GROQ_API_KEY") else (False, None)
+    if transcriber == "openai":
+        return (True, "openai") if _read_env_key("OPENAI_API_KEY") else (False, None)
+
     if _read_env_key("GROQ_API_KEY"):
         return True, "groq"
     if _read_env_key("OPENAI_API_KEY"):
@@ -276,7 +334,10 @@ def cmd_check() -> int:
     if s["missing_binaries"]:
         parts.append(f"missing binaries: {', '.join(s['missing_binaries'])}")
     if not s["has_api_key"] and not s["setup_complete"]:
-        parts.append("no Whisper API key (GROQ_API_KEY or OPENAI_API_KEY)")
+        if _have_doubao_creds():
+            parts.append("Doubao credentials are set but WATCH_TRANSCRIBER is not doubao")
+        else:
+            parts.append("no transcriber API key (GROQ_API_KEY, OPENAI_API_KEY, or Doubao credentials)")
     installer = Path(__file__).resolve()
     sys.stderr.write(
         f"[watch] setup incomplete ({'; '.join(parts)}). "
@@ -334,12 +395,16 @@ def cmd_install() -> int:
     has_key, backend = _have_api_key()
     if has_key:
         _write_setup_complete()
-        print(f"[setup] ready. whisper backend: {backend}")
+        print(f"[setup] ready. transcriber: {backend}")
         if installed_deps:
             print("[setup] installed dependencies; /watch is fully set up.")
         return 0
 
     print("")
+    if _have_doubao_creds():
+        print("[setup] Doubao ASR credentials found, but WATCH_TRANSCRIBER is not set to doubao —")
+        print(f"  add `WATCH_TRANSCRIBER=doubao` to {CONFIG_FILE} to use them, or add a Whisper key below.")
+        print("")
     print("[setup] one step left: add a Whisper API key.")
     print("")
     print(f"  Edit {CONFIG_FILE} and set either:")

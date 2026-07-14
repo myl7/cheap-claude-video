@@ -27,7 +27,7 @@ from urllib.request import Request, urlopen
 
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_MODEL = "whisper-large-v3"
+GROQ_MODEL = "whisper-large-v3-turbo"
 
 OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_MODEL = "whisper-1"
@@ -112,18 +112,30 @@ def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, 
     return None, None
 
 
-def extract_audio(video_path: str, out_path: Path) -> Path:
-    """Extract mono 16kHz 64kbps mp3 — ~480 kB/min, fits any Whisper limit."""
+def extract_audio(
+    video_path: str,
+    out_path: Path,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> Path:
+    """Extract mono 16kHz 64kbps mp3 — ~480 kB/min, fits any Whisper limit.
+
+    When start/end are given, only that window is extracted so the API only
+    processes (and bills for) the focus range. Returned segment timestamps are
+    then relative to the window; the caller shifts them to absolute time.
+    """
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-i", str(Path(video_path).resolve()),
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    start = start_seconds if (start_seconds and start_seconds > 0) else 0.0
+    if start:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-i", str(Path(video_path).resolve())]
+    if end_seconds is not None and end_seconds > start:
+        cmd += ["-t", f"{end_seconds - start:.3f}"]
+    cmd += [
         "-vn",
         "-acodec", "libmp3lame",
         "-ar", "16000",
@@ -416,8 +428,13 @@ def transcribe_video(
     audio_out: Path,
     backend: str | None = None,
     api_key: str | None = None,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
 ) -> tuple[list[dict], str]:
     """Run the full flow: extract audio → upload → parse segments.
+
+    When start/end are given, only that window is transcribed (and billed), and
+    the returned segment timestamps are shifted back to absolute source time.
 
     Returns (segments, backend_used). Raises SystemExit on any failure.
     """
@@ -434,8 +451,9 @@ def transcribe_video(
             f"Run `python3 {setup_py}` to configure."
         )
 
+    range_offset = start_seconds if (start_seconds and start_seconds > 0) else 0.0
     print(f"[watch] extracting audio for Whisper ({backend})…", file=sys.stderr)
-    audio_path = extract_audio(video_path, audio_out)
+    audio_path = extract_audio(video_path, audio_out, start_seconds, end_seconds)
     audio_bytes = audio_path.stat().st_size
 
     def transcribe_one(path: Path) -> list[dict]:
@@ -461,6 +479,7 @@ def transcribe_video(
     if not segments:
         raise SystemExit("Whisper returned no transcript segments")
 
+    segments = shift_segments(segments, range_offset)
     print(f"[watch] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
     return segments, backend
 

@@ -13,6 +13,11 @@ DEFAULT_DETAIL = "balanced"
 
 DETAILS = {"transcript", "efficient", "balanced", "token-burner"}
 
+DEFAULT_TRANSCRIBER = "auto"
+
+# auto = Whisper (Groq→OpenAI); doubao/groq/openai force one backend.
+TRANSCRIBERS = {"auto", "groq", "openai", "doubao"}
+
 
 def read_env_file(path: Path | None = None) -> dict[str, str]:
     if path is None:
@@ -56,8 +61,17 @@ def get_config() -> dict[str, object]:
     if detail not in DETAILS:
         detail = DEFAULT_DETAIL
 
+    transcriber = (
+        os.environ.get("WATCH_TRANSCRIBER")
+        or file_values.get("WATCH_TRANSCRIBER")
+        or DEFAULT_TRANSCRIBER
+    )
+    if transcriber not in TRANSCRIBERS:
+        transcriber = DEFAULT_TRANSCRIBER
+
     return {
         "detail": detail,
+        "transcriber": transcriber,
         "config_file": str(CONFIG_FILE),
     }
 

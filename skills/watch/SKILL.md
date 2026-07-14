@@ -147,8 +147,8 @@ Optional flags:
 - `--resolution W` — change frame width in px (default 512; bump to 1024 only if the user needs to read on-screen text)
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
-- `--whisper groq|openai` — force a specific Whisper backend (default: prefer Groq if both keys exist)
-- `--no-whisper` — disable the Whisper fallback entirely (frames-only if no captions)
+- `--whisper groq|openai|doubao` — force a specific transcription backend. `groq`/`openai` = Whisper API; `doubao` = Doubao (Volcano Engine) streaming ASR 2.0, which is markedly better on Chinese and Chinese dialects and mixed zh/en. Default: the `WATCH_TRANSCRIBER` config, else prefer Groq → OpenAI. Reach for `doubao` when the audio is Chinese and Whisper's transcript looks weak.
+- `--no-whisper` — disable the transcription fallback entirely (frames-only if no captions)
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the previous kept one (held slides, static screen recordings, paused video) so the frame budget goes to distinct content; the report's **Frames** line notes how many were dropped. Pass this only if the user needs every sampled frame (e.g. judging subtle frame-to-frame motion).
 
 ### Focusing on a section (higher frame rate)
@@ -166,7 +166,7 @@ Focused mode is the right call for:
 - Any video longer than ~10 minutes where the user's question is about a specific part — running focused on the relevant section is far more useful than a sparse scan of the whole thing.
 - Re-runs after a full scan didn't have enough detail in some region.
 
-Transcript is auto-filtered to the same range. Frame timestamps are absolute (real video timeline, not offset-from-start).
+Frames are extracted at the exact focus range. The transcript is filtered to a slightly **wider** window — the focus range padded by a lead-in/lead-out margin (25% of the focus length, clamped to 10-30s on each side) — so Claude sees the sentence that set up the moment and the one that follows it. The report's transcript header prints both the widened window and the underlying focus range. Frame timestamps are absolute (real video timeline, not offset-from-start).
 
 Examples:
 ```bash
@@ -184,7 +184,7 @@ python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --start 1:12:00
 
 **Step 4 — answer the user.** You now have two streams of evidence:
 - **Frames** — what's on screen at each timestamp
-- **Transcript** — what's said at each timestamp. The report's header shows the source (`captions` = yt-dlp pulled native subs; `whisper (groq)` or `whisper (openai)` = transcribed by API).
+- **Transcript** — what's said at each timestamp. The report's header shows the source (`captions` = yt-dlp pulled native subs; `whisper (groq)` / `whisper (openai)` / `doubao (streaming 2.0)` = transcribed by API).
 
 If the user asked a specific question, answer it directly citing timestamps. If they didn't ask anything, summarize what happens in the video — structure, key moments, notable visuals, spoken content.
 
@@ -223,11 +223,12 @@ Behavior:
 The script gets a timestamped transcript in one of two ways:
 
 1. **Native captions (free, preferred).** yt-dlp pulls manual or auto-generated subtitles from the source platform if available.
-2. **Whisper API fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and uploads it to whichever Whisper API has a key configured:
-   - **Groq** — `whisper-large-v3`. Preferred default: cheaper, faster. Get a key at console.groq.com/keys.
+2. **API fallback.** If no captions came back (or the source is a local file), the script extracts audio and sends it to whichever transcription backend is configured:
+   - **Groq** — `whisper-large-v3-turbo`. Preferred default: cheaper, faster. Extracts mono 16kHz mp3 (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min). Get a key at console.groq.com/keys.
    - **OpenAI** — `whisper-1`. Fallback. Get a key at platform.openai.com/api-keys.
+   - **Doubao (Volcano Engine) streaming ASR 2.0** — `volc.seedasr.sauc`. Best for Chinese and Chinese dialects (普通话/粤语/上海话/四川话/陕西话…) and mixed zh/en; Whisper is weaker there. Streams mono 16kHz PCM straight to the WebSocket endpoint (no object storage needed), ~1 CNY/hour. Enable the service and get credentials at console.volcengine.com/speech/app. Set either `DOUBAO_ASR_APP_ID` + `DOUBAO_ASR_ACCESS_TOKEN` (old console) or `DOUBAO_ASR_API_KEY` (new console) in `.env`.
 
-Both keys live in `~/.config/watch/.env`. The script prefers Groq when both are set; override with `--whisper openai` to force OpenAI. Use `--no-whisper` to skip the fallback entirely.
+All credentials live in `~/.config/watch/.env`. Backend selection: `--whisper` wins, else `WATCH_TRANSCRIBER` (`auto`|`groq`|`openai`|`doubao`; `auto` = Whisper Groq→OpenAI). Set `WATCH_TRANSCRIBER=doubao` to make Doubao the default. Use `--no-whisper` to skip the fallback entirely. Cost note: Doubao ASR (~1 CNY/hr) is about the same price as Groq; the reason to pick it is Chinese-language accuracy, not cost.
 
 ## Failure modes and handling
 
@@ -236,6 +237,7 @@ Both keys live in `~/.config/watch/.env`. The script prefers Groq when both are 
 - **Long video warning printed** → acknowledge it in your answer. Offer to re-run focused on a specific section via `--start`/`--end` rather than a sparse full-video scan.
 - **Download fails** → yt-dlp's error goes to stderr. If it's a login-required or region-locked video, tell the user plainly; do not keep retrying.
 - **Whisper request fails** → the error is printed to stderr (likely: invalid key or rate limit). Audio over the API's 25 MB upload cap is split into chunks and transcribed automatically, so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk fails. You can retry with `--whisper openai` if Groq failed (or vice versa).
+- **Doubao ASR fails** → the error (with the Volcano `logid` and status code) is printed to stderr. Common causes: the streaming ASR 2.0 service is not enabled in the console, wrong credentials, or a wrong resource id. The `logid` is the key to open a support ticket. If Doubao is unavailable, retry with `--whisper groq` to fall back to Whisper.
 
 ## Token efficiency
 
@@ -253,16 +255,17 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Runs `ffmpeg` / `ffprobe` locally to extract frames as JPEGs and, when Whisper is needed, a mono 16 kHz audio clip
 - Sends the extracted audio clip to Groq's Whisper API (`api.groq.com/openai/v1/audio/transcriptions`) when `GROQ_API_KEY` is set (preferred — cheaper, faster)
 - Sends the extracted audio clip to OpenAI's audio transcription API (`api.openai.com/v1/audio/transcriptions`) when `OPENAI_API_KEY` is set and Groq is not, or when `--whisper openai` is forced
+- Streams the extracted audio (mono 16 kHz PCM) to Doubao / Volcano Engine streaming ASR over WebSocket (`wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream`) when the `doubao` transcriber is selected and Doubao credentials are set
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
-- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s) and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
+- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the transcription credentials and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 
 **What this skill does NOT do:**
-- Does not upload the video itself to any API — only the extracted audio goes out, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`
-- Does not access any platform account (no login, no session cookies, no posting) — yt-dlp only ever requests public data
-- Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
-- Does not log, cache, or write API keys to stdout, stderr, or output files
+- Does not upload the video itself to any API — only the extracted audio goes out, and only when native captions are missing AND the fallback is not disabled with `--no-whisper`
+- Does not post or modify anything, and only reads public data — except that if you set `WATCH_YTDLP_COOKIES_FROM_BROWSER`/`WATCH_YTDLP_COOKIES_FILE` (needed for gated sites like Bilibili), yt-dlp will send those browser cookies to the video host. Setting `WATCH_YTDLP_REMOTE_COMPONENTS` (off by default) makes yt-dlp fetch+run a JS challenge solver component from its GitHub for YouTube URLs — an opt-in for when YouTube's anti-bot blocks a download
+- Does not share credentials between providers (Groq key only goes to `api.groq.com`, OpenAI key only to `api.openai.com`, Doubao credentials only to `openspeech.bytedance.com`)
+- Does not log, cache, or write credentials to stdout, stderr, or output files
 - Does not persist anything outside the working directory and `~/.config/watch/.env` — clean up the working directory when you're done (Step 5)
 
-**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/setup.py` (preflight + installer)
+**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/doubao.py` (Doubao streaming ASR client), `scripts/setup.py` (preflight + installer)
 
 Review scripts before first use to verify behavior.

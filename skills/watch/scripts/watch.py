@@ -18,8 +18,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from config import frame_cap, get_config  # noqa: E402
 from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
-from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
+from transcribe import context_window, filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
+import doubao  # noqa: E402
 
 
 def main() -> int:
@@ -56,9 +57,11 @@ def main() -> int:
     )
     ap.add_argument(
         "--whisper",
-        choices=["groq", "openai"],
+        choices=["groq", "openai", "doubao"],
         default=None,
-        help="Force a specific Whisper backend. Default: prefer Groq, fall back to OpenAI.",
+        help="Force a transcription backend. groq/openai = Whisper API; doubao = "
+             "Doubao (Volcano Engine) streaming ASR 2.0 (better for Chinese/dialects). "
+             "Default: WATCH_TRANSCRIBER, else prefer Groq → OpenAI.",
     )
     ap.add_argument(
         "--no-dedup",
@@ -152,6 +155,15 @@ def main() -> int:
     effective_duration = max(0.0, effective_end - effective_start)
     focused = start_sec is not None or end_sec is not None
 
+    # Frames are extracted at the exact focus range; the transcript uses a wider
+    # window so Claude sees the lead-in/lead-out around the moment. ctx_* are
+    # None when not focused, so every filter/extract below stays whole-video.
+    ctx_start, ctx_end = (
+        context_window(start_sec, end_sec, full_duration) if focused else (None, None)
+    )
+    transcript_start = ctx_start if ctx_start is not None else 0.0
+    transcript_end = ctx_end if ctx_end is not None else effective_end
+
     if focused:
         fps, target = auto_fps_focus(effective_duration, max_frames=budget_cap)
     else:
@@ -161,7 +173,7 @@ def main() -> int:
         target = max(1, int(round(fps * effective_duration)))
 
     if transcript_segments and focused:
-        transcript_segments = filter_range(transcript_segments, start_sec, end_sec)
+        transcript_segments = filter_range(transcript_segments, ctx_start, ctx_end)
         transcript_text = format_transcript(transcript_segments)
 
     scope = (
@@ -230,38 +242,70 @@ def main() -> int:
     if not transcript_segments and dl.get("subtitle_path"):
         try:
             all_segments = parse_vtt(dl["subtitle_path"])
-            transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
+            transcript_segments = filter_range(all_segments, ctx_start, ctx_end) if focused else all_segments
             transcript_text = format_transcript(transcript_segments)
             transcript_source = "captions"
         except Exception as exc:
             print(f"[watch] subtitle parse failed: {exc}", file=sys.stderr)
 
+    # Resolve the transcription backend: explicit --whisper wins, else the
+    # WATCH_TRANSCRIBER config ("auto" means Whisper Groq→OpenAI).
+    requested = args.whisper
+    if requested is None and config["transcriber"] != "auto":
+        requested = str(config["transcriber"])
+
     if not transcript_segments and not args.no_whisper and video_path and meta.get("has_audio"):
-        backend, api_key = load_api_key(args.whisper)
-        if backend and api_key:
-            try:
-                all_segments, used_backend = transcribe_video(
-                    video_path,
-                    work / "audio.mp3",
-                    backend=backend,
-                    api_key=api_key,
+        if requested == "doubao":
+            creds = doubao.load_credentials()
+            if creds:
+                try:
+                    all_segments, used_backend = doubao.transcribe_video(
+                        video_path,
+                        work / "audio.pcm",
+                        headers=creds,
+                        start_seconds=ctx_start if focused else None,
+                        end_seconds=ctx_end if focused else None,
+                    )
+                    transcript_segments = filter_range(all_segments, ctx_start, ctx_end) if focused else all_segments
+                    transcript_text = format_transcript(transcript_segments)
+                    transcript_source = used_backend
+                except SystemExit as exc:
+                    print(f"[watch] Doubao ASR failed: {exc}", file=sys.stderr)
+            else:
+                setup_py = SCRIPT_DIR / "setup.py"
+                print(
+                    "[watch] doubao transcriber selected but no Doubao credentials found "
+                    f"(DOUBAO_ASR_APP_ID + DOUBAO_ASR_ACCESS_TOKEN) — run `python3 {setup_py}`",
+                    file=sys.stderr,
                 )
-                transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
-                transcript_text = format_transcript(transcript_segments)
-                transcript_source = f"whisper ({used_backend})"
-            except SystemExit as exc:
-                print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
         else:
-            hint = (
-                f"--whisper {args.whisper} was set but the matching API key is missing"
-                if args.whisper else
-                "no subtitles and no Whisper API key found"
-            )
-            setup_py = SCRIPT_DIR / "setup.py"
-            print(
-                f"[watch] {hint} — run `python3 {setup_py}` to enable the Whisper fallback",
-                file=sys.stderr,
-            )
+            backend, api_key = load_api_key(requested)
+            if backend and api_key:
+                try:
+                    all_segments, used_backend = transcribe_video(
+                        video_path,
+                        work / "audio.mp3",
+                        backend=backend,
+                        api_key=api_key,
+                        start_seconds=ctx_start if focused else None,
+                        end_seconds=ctx_end if focused else None,
+                    )
+                    transcript_segments = filter_range(all_segments, ctx_start, ctx_end) if focused else all_segments
+                    transcript_text = format_transcript(transcript_segments)
+                    transcript_source = f"whisper ({used_backend})"
+                except SystemExit as exc:
+                    print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
+            else:
+                hint = (
+                    f"--whisper {requested} was set but the matching API key is missing"
+                    if requested else
+                    "no subtitles and no Whisper API key found"
+                )
+                setup_py = SCRIPT_DIR / "setup.py"
+                print(
+                    f"[watch] {hint} — run `python3 {setup_py}` to enable the Whisper fallback",
+                    file=sys.stderr,
+                )
     elif not transcript_segments and video_path and not meta.get("has_audio"):
         print("[watch] no audio stream found — proceeding without transcription", file=sys.stderr)
 
@@ -308,7 +352,7 @@ def main() -> int:
     if frames:
         print(f"- **Frame size:** max {args.resolution}px wide, max 1998px tall")
     if transcript_segments:
-        in_range = " in range" if focused else ""
+        in_range = " in range (+context)" if focused else ""
         print(
             f"- **Transcript:** {len(transcript_segments)} segments{in_range} "
             f"(via {transcript_source or 'captions'})"
@@ -358,7 +402,11 @@ def main() -> int:
     if transcript_text:
         label = transcript_source or "captions"
         if focused:
-            print(f"_Source: {label}. Filtered to {format_time(effective_start)} → {format_time(effective_end)}:_")
+            print(
+                f"_Source: {label}. Filtered to {format_time(transcript_start)} → "
+                f"{format_time(transcript_end)} — focus {format_time(effective_start)} → "
+                f"{format_time(effective_end)} widened for lead-in/lead-out context:_"
+            )
         else:
             print(f"_Source: {label}._")
         print()
@@ -372,7 +420,7 @@ def main() -> int:
             "`--detail balanced` for frames._"
         )
     elif focused and dl.get("subtitle_path"):
-        print(f"_No transcript lines fell inside {format_time(effective_start)} → {format_time(effective_end)}._")
+        print(f"_No transcript lines fell inside {format_time(transcript_start)} → {format_time(transcript_end)}._")
     else:
         setup_py = SCRIPT_DIR / "setup.py"
         print(

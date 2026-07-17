@@ -120,7 +120,9 @@ def load_credentials() -> dict | None:
 
     Two credential shapes are supported:
       - New console: a single API key (DOUBAO_ASR_API_KEY) → X-Api-Key.
-      - Old console: APP ID + Access Token → X-Api-App-Key + X-Api-Access-Key.
+      - DOUBAO_ASR_ACCESS_TOKEN with an APP ID uses the old
+        X-Api-App-Key + X-Api-Access-Key pair. Without an APP ID, the token is
+        treated as a new-console key and sent as X-Api-Key.
     """
     resource_id = _lookup("DOUBAO_ASR_RESOURCE_ID") or DEFAULT_RESOURCE_ID
 
@@ -133,10 +135,15 @@ def load_credentials() -> dict | None:
 
     app_id = _lookup("DOUBAO_ASR_APP_ID") or _lookup("DOUBAO_ASR_APP_KEY")
     access_token = _lookup("DOUBAO_ASR_ACCESS_TOKEN") or _lookup("DOUBAO_ASR_ACCESS_KEY")
-    if app_id and access_token:
+    if access_token:
+        if app_id:
+            return {
+                "X-Api-App-Key": app_id,
+                "X-Api-Access-Key": access_token,
+                "X-Api-Resource-Id": resource_id,
+            }
         return {
-            "X-Api-App-Key": app_id,
-            "X-Api-Access-Key": access_token,
+            "X-Api-Key": access_token,
             "X-Api-Resource-Id": resource_id,
         }
     return None
@@ -565,8 +572,9 @@ def transcribe_video(
     if not headers:
         setup_py = Path(__file__).resolve().parent / "setup.py"
         raise SystemExit(
-            "No Doubao ASR credentials. Set DOUBAO_ASR_APP_ID + DOUBAO_ASR_ACCESS_TOKEN "
-            "(or DOUBAO_ASR_API_KEY) in the environment or in ~/.config/watch/.env. "
+            "No Doubao ASR credentials. Set DOUBAO_ASR_ACCESS_TOKEN "
+            "(optionally DOUBAO_ASR_APP_ID), or set DOUBAO_ASR_API_KEY, in the "
+            "environment or in ~/.config/watch/.env. "
             f"Run `python3 {setup_py}` to configure."
         )
     if language is None:

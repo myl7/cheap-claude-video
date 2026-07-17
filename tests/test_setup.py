@@ -116,6 +116,20 @@ def test_doubao_creds_are_ready_when_transcriber_is_doubao(tmp_path):
     assert js["whisper_backend"] == "doubao"
 
 
+def test_doubao_token_only_is_ready_when_transcriber_is_doubao(tmp_path):
+    _write_env(
+        tmp_path,
+        "DOUBAO_ASR_ACCESS_TOKEN=token\nWATCH_TRANSCRIBER=doubao\n",
+    )
+    chk = _run(["--check"], home=tmp_path)
+    assert chk.returncode == 0, chk.stderr
+
+    js = json.loads(_run(["--json"], home=tmp_path).stdout)
+    assert js["status"] == "ready"
+    assert js["can_proceed"] is True
+    assert js["whisper_backend"] == "doubao"
+
+
 def test_groq_key_ignored_when_transcriber_pinned_to_openai(tmp_path):
     """Explicitly selecting one backend must not fall through to another —
     matches watch.py, which never silently substitutes a different backend

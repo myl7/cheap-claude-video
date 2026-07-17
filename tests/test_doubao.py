@@ -59,6 +59,13 @@ class TestLoadCredentials:
             "X-Api-Resource-Id": doubao.DEFAULT_RESOURCE_ID,
         }
 
+    def test_access_token_without_app_id_uses_new_console_header(self, monkeypatch):
+        monkeypatch.setenv("DOUBAO_ASR_ACCESS_TOKEN", "tok456")
+        assert doubao.load_credentials() == {
+            "X-Api-Key": "tok456",
+            "X-Api-Resource-Id": doubao.DEFAULT_RESOURCE_ID,
+        }
+
     def test_app_id_without_token_is_incomplete(self, monkeypatch):
         monkeypatch.setenv("DOUBAO_ASR_APP_ID", "app123")
         assert doubao.load_credentials() is None

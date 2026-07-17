@@ -57,7 +57,8 @@ OPENAI_API_KEY=
 # and mixed zh/en. Streams local audio directly (no object storage needed),
 # ~1 CNY/hour. Enable the service and get credentials at:
 #   https://console.volcengine.com/speech/app  (开通「豆包流式语音识别模型2.0」)
-# Old console: set APP ID + Access Token. New console: set just the API key.
+# With APP ID, Access Token uses the old two-header auth. Without APP ID, the
+# token is treated as the new-console API key. DOUBAO_ASR_API_KEY is explicit.
 DOUBAO_ASR_APP_ID=
 DOUBAO_ASR_ACCESS_TOKEN=
 # DOUBAO_ASR_API_KEY=
@@ -150,9 +151,8 @@ def _read_env_key(name: str) -> str | None:
 def _have_doubao_creds() -> bool:
     if _read_env_key("DOUBAO_ASR_API_KEY"):
         return True
-    app_id = _read_env_key("DOUBAO_ASR_APP_ID") or _read_env_key("DOUBAO_ASR_APP_KEY")
     token = _read_env_key("DOUBAO_ASR_ACCESS_TOKEN") or _read_env_key("DOUBAO_ASR_ACCESS_KEY")
-    return bool(app_id and token)
+    return bool(token)
 
 
 def _have_api_key() -> tuple[bool, str | None]:

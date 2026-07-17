@@ -64,6 +64,14 @@ def main() -> int:
              "Default: WATCH_TRANSCRIBER, else prefer Groq → OpenAI.",
     )
     ap.add_argument(
+        "--ignore-captions",
+        action="store_true",
+        help="Ignore native captions and force ASR transcription from the audio. Use "
+             "when captions exist but are useless — mostly [Music]/'foreign'/empty "
+             "placeholders (songs, or non-English speech YouTube couldn't caption). "
+             "Forces a download even in transcript detail so the audio is available.",
+    )
+    ap.add_argument(
         "--no-dedup",
         action="store_true",
         help="Disable near-duplicate frame removal. Keeps visually identical "
@@ -100,7 +108,12 @@ def main() -> int:
     if url_source:
         print("[watch] checking metadata/captions via yt-dlp…", file=sys.stderr)
         dl = fetch_captions(args.source, work / "download")
-        if dl.get("subtitle_path"):
+        if args.ignore_captions and dl.get("subtitle_path"):
+            print(
+                "[watch] --ignore-captions set: skipping native captions, forcing ASR transcription",
+                file=sys.stderr,
+            )
+        if dl.get("subtitle_path") and not args.ignore_captions:
             try:
                 transcript_segments = parse_vtt(dl["subtitle_path"])
                 transcript_text = format_transcript(transcript_segments)
@@ -239,7 +252,7 @@ def main() -> int:
     if cue_frames:
         frames = merge_frames(frames, cue_frames)
 
-    if not transcript_segments and dl.get("subtitle_path"):
+    if not transcript_segments and dl.get("subtitle_path") and not args.ignore_captions:
         try:
             all_segments = parse_vtt(dl["subtitle_path"])
             transcript_segments = filter_range(all_segments, ctx_start, ctx_end) if focused else all_segments
@@ -275,7 +288,8 @@ def main() -> int:
                 setup_py = SCRIPT_DIR / "setup.py"
                 print(
                     "[watch] doubao transcriber selected but no Doubao credentials found "
-                    f"(DOUBAO_ASR_APP_ID + DOUBAO_ASR_ACCESS_TOKEN) — run `python3 {setup_py}`",
+                    f"(set DOUBAO_ASR_ACCESS_TOKEN or DOUBAO_ASR_API_KEY) — "
+                    f"run `python3 {setup_py}`",
                     file=sys.stderr,
                 )
         else:

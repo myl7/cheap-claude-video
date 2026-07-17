@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 WATCH = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts" / "watch.py"
@@ -14,10 +15,13 @@ def _run(clip: Path, *args: str, env_extra: dict | None = None) -> str:
     env.pop("WATCH_DETAIL", None)
     if env_extra:
         env.update(env_extra)
-    proc = subprocess.run(
-        [sys.executable, str(WATCH), str(clip), "--no-whisper", *args],
-        capture_output=True, text=True, env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="watch-test-home-") as test_home:
+        env["HOME"] = test_home
+        env["USERPROFILE"] = test_home  # Windows
+        proc = subprocess.run(
+            [sys.executable, str(WATCH), str(clip), "--no-whisper", *args],
+            capture_output=True, text=True, env=env,
+        )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
 

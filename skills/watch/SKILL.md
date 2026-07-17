@@ -1,6 +1,6 @@
 ---
 name: watch
-version: "0.2.0"
+version: "0.2.1"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or Whisper API fallback), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
@@ -148,6 +148,7 @@ Optional flags:
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
 - `--whisper groq|openai|doubao` — force a specific transcription backend. `groq`/`openai` = Whisper API; `doubao` = Doubao (Volcano Engine) streaming ASR 2.0, which is markedly better on Chinese and Chinese dialects and mixed zh/en. Default: the `WATCH_TRANSCRIBER` config, else prefer Groq → OpenAI. Reach for `doubao` when the audio is Chinese and Whisper's transcript looks weak.
+- `--ignore-captions` — ignore native captions and transcribe the audio with an ASR backend instead. Reach for this when captions came back but are **useless** (mostly `[Music]` / `foreign` / empty placeholders — songs, or non-English speech YouTube couldn't caption). Forces a download even at `transcript` detail so the audio is available. See "When native captions are useless" below.
 - `--no-whisper` — disable the transcription fallback entirely (frames-only if no captions)
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the previous kept one (held slides, static screen recordings, paused video) so the frame budget goes to distinct content; the report's **Frames** line notes how many were dropped. Pass this only if the user needs every sampled frame (e.g. judging subtle frame-to-frame motion).
 
@@ -185,6 +186,8 @@ python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --start 1:12:00
 **Step 4 — answer the user.** You now have two streams of evidence:
 - **Frames** — what's on screen at each timestamp
 - **Transcript** — what's said at each timestamp. The report's header shows the source (`captions` = yt-dlp pulled native subs; `whisper (groq)` / `whisper (openai)` / `doubao (streaming 2.0)` = transcribed by API).
+
+**Before you answer, sanity-check the transcript when it came `via captions`.** Native captions are preferred because they're free, but "present" does not mean "usable" — yt-dlp will return a caption track that carries almost no information (a song that is all `[Music]`, non-English speech YouTube marked as `foreign`, or a near-empty track). The script cannot tell a rich transcript from a junk one — that judgment is yours. If the caption transcript is dominated by `[Music]`, `foreign`, empty lines, or filler for a video that clearly has real speech or lyrics, **do not answer from it** — re-run with `--ignore-captions` to transcribe the audio instead (see "When native captions are useless" under Transcription). This does not apply to ASR transcripts (`whisper …` / `doubao …`), which already came from the audio.
 
 If the user asked a specific question, answer it directly citing timestamps. If they didn't ask anything, summarize what happens in the video — structure, key moments, notable visuals, spoken content.
 
@@ -226,9 +229,29 @@ The script gets a timestamped transcript in one of two ways:
 2. **API fallback.** If no captions came back (or the source is a local file), the script extracts audio and sends it to whichever transcription backend is configured:
    - **Groq** — `whisper-large-v3-turbo`. Preferred default: cheaper, faster. Extracts mono 16kHz mp3 (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min). Get a key at console.groq.com/keys.
    - **OpenAI** — `whisper-1`. Fallback. Get a key at platform.openai.com/api-keys.
-   - **Doubao (Volcano Engine) streaming ASR 2.0** — `volc.seedasr.sauc`. Best for Chinese and Chinese dialects (普通话/粤语/上海话/四川话/陕西话…) and mixed zh/en; Whisper is weaker there. Streams mono 16kHz PCM straight to the WebSocket endpoint (no object storage needed), ~1 CNY/hour. Enable the service and get credentials at console.volcengine.com/speech/app. Set either `DOUBAO_ASR_APP_ID` + `DOUBAO_ASR_ACCESS_TOKEN` (old console) or `DOUBAO_ASR_API_KEY` (new console) in `.env`.
+   - **Doubao (Volcano Engine) streaming ASR 2.0** — `volc.seedasr.sauc`. Best for Chinese and Chinese dialects (普通话/粤语/上海话/四川话/陕西话…) and mixed zh/en; Whisper is weaker there. Streams mono 16kHz PCM straight to the WebSocket endpoint (no object storage needed), ~1 CNY/hour. Enable the service and get credentials at console.volcengine.com/speech/app. Set `DOUBAO_ASR_ACCESS_TOKEN` with optional `DOUBAO_ASR_APP_ID`, or set `DOUBAO_ASR_API_KEY` explicitly. When App ID is absent, `DOUBAO_ASR_ACCESS_TOKEN` is sent using the new-console `X-Api-Key` header.
 
 All credentials live in `~/.config/watch/.env`. Backend selection: `--whisper` wins, else `WATCH_TRANSCRIBER` (`auto`|`groq`|`openai`|`doubao`; `auto` = Whisper Groq→OpenAI). Set `WATCH_TRANSCRIBER=doubao` to make Doubao the default. Use `--no-whisper` to skip the fallback entirely. Cost note: Doubao ASR (~1 CNY/hr) is about the same price as Groq; the reason to pick it is Chinese-language accuracy, not cost.
+
+### When native captions are useless → force ASR with `--ignore-captions`
+
+The script prefers native captions because they're free, and by default the ASR backend only runs when **no** captions came back. But a caption track that exists can still be worthless:
+
+- **Songs / music videos** — the track is mostly `[Music]` markers with no lyrics.
+- **Non-English (or wrong-language) speech** — YouTube's English auto-captioner emits `foreign` as a placeholder for speech it won't transcribe, so a Japanese/Chinese video can come back as a page of `foreign [Music]`.
+- **Near-empty tracks** — a handful of short, garbled, or repeated lines that don't match the video's length or content.
+
+The script can't distinguish a rich transcript from a junk one, so it will hand you the captions and skip ASR. **You** make that call: read the transcript in the report (Step 4), and when it's dominated by `[Music]`, `foreign`, empty lines, or filler for a video that clearly has real speech or lyrics, re-run with `--ignore-captions` to skip the captions and transcribe the audio instead:
+
+```bash
+# Japanese song — captions were just [Music]/foreign; Whisper handles the vocals
+python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --ignore-captions --whisper groq
+```
+
+- `--ignore-captions` forces a download even at `transcript` detail (which normally skips the download when captions exist) so the audio is available to the ASR backend.
+- **Pick the backend for the language.** Use `--whisper doubao` for Chinese / Chinese dialects / mixed zh-en; use `--whisper groq` (or `openai`) for Japanese, Korean, European languages, and anything else Whisper handles well. Omit `--whisper` to use the configured default — but note that if the default is Doubao and the audio is *not* Chinese, you should override it. Doubao accepts `DOUBAO_ASR_ACCESS_TOKEN` alone as new-console `X-Api-Key`; add `DOUBAO_ASR_APP_ID` only for old-console two-header authentication.
+- If you already downloaded the video on a prior run, point the re-run at the **local file** in the work dir so it doesn't re-download.
+- Only worth it when there's actually speech or lyrics to recover. A silent screen recording gains nothing from ASR — stay on frames (`--detail balanced`).
 
 ## Failure modes and handling
 
